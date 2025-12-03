@@ -6,6 +6,7 @@ import sys
 import argparse
 from scipy.optimize import minimize
 from scipy.spatial.transform import Rotation as R
+from tqdm import tqdm
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -62,18 +63,19 @@ class MLEAttitudeEstimator:
         self.sun_sigma = None
         self.sigmas_estimated = False
 
-    def estimate_sigmas(self, df):
-        """Estimate sun and nadir measurement uncertainties from data."""
-        print(f"\nEstimating measurement uncertainties from data...")
+    def compute_component_estimates(self, df):
+        """Compute sun and nadir estimates for all samples, and calculate standard deviations.
 
+        Returns:
+            cached_estimates: List of (sun_est, nadir_est, sun_err, nadir_err) tuples
+        """
+        print(f"\nComputing sun and nadir estimates for all samples...")
+
+        cached_estimates = []
         sun_errors = []
         nadir_errors = []
 
-        # Collect all errors
-        for i, row in df.iterrows():
-            if i % 100 == 0:
-                print(f"  Processing: {i}/{len(df)}...", end='\r')
-
+        for i, row in tqdm(df.iterrows(), total=len(df), desc="Computing estimates"):
             sensor_cols = [f'Sensor_{k+1}' for k in range(16)]
             sensors = row[sensor_cols].values.astype(float)
             sun_body_true = row[['Sun_X', 'Sun_Y', 'Sun_Z']].values.astype(float)
@@ -84,18 +86,22 @@ class MLEAttitudeEstimator:
             # Sun estimate (RANSAC)
             sun_body_est, valid = estimate_sun_vector_ransac(sensors, SENSOR_NORMALS)
             if not valid or sun_body_est is None:
+                cached_estimates.append((None, None, None, None))
                 continue
 
             # Nadir estimate (Entropy)
-            nadir_est, _, _ = self.predict_nadir(sensors, albedo, sun_nadir_angle, sun_body_est)
+            nadir_est, entropy, _ = self.predict_nadir(sensors, albedo, sun_nadir_angle, sun_body_est)
             if nadir_est is None:
+                cached_estimates.append((sun_body_est, None, None, None))
                 continue
 
+            # Compute errors
             sun_err = angular_error_between_vectors(sun_body_est, sun_body_true)
             nadir_err = angular_error_between_vectors(nadir_est, nadir_body_true)
 
             sun_errors.append(sun_err)
             nadir_errors.append(nadir_err)
+            cached_estimates.append((sun_body_est, nadir_est, sun_err, nadir_err))
 
         sun_errors = np.array(sun_errors)
         nadir_errors = np.array(nadir_errors)
@@ -107,11 +113,13 @@ class MLEAttitudeEstimator:
 
         print(f"\n")
         print("="*70)
-        print("ESTIMATED MEASUREMENT UNCERTAINTIES")
+        print("ESTIMATED MEASUREMENT STANDARD DEVIATIONS")
         print("="*70)
         print(f"Sun σ:   {self.sun_sigma:.4f}°")
         print(f"Nadir σ: {self.nadir_sigma:.4f}°")
         print("="*70 + "\n")
+
+        return cached_estimates
 
     def predict_nadir(self, sensors, albedo, sun_nadir_angle, sun_body):
         """Predict nadir vector using Entropy Estimator.
@@ -143,15 +151,24 @@ class MLEAttitudeEstimator:
             nll += 0.5 * (angular_error_deg / sigma)**2
         return nll
 
-    def estimate_attitude(self, sensors, sun_body, sun_eci, nadir_eci, albedo, sun_nadir_angle):
+    def estimate_attitude(self, sun_body, nadir_body, sun_eci, nadir_eci):
+        """Estimate attitude quaternion using MLE with sun and nadir measurements.
 
-        # Get nadir prediction
-        nadir_body, entropy, _ = self.predict_nadir(sensors, albedo, sun_nadir_angle, sun_body)
-        if nadir_body is None: return None
+        Args:
+            sun_body: Sun vector in body frame
+            nadir_body: Nadir vector in body frame
+            sun_eci: Sun vector in ECI frame
+            nadir_eci: Nadir vector in ECI frame
 
-        # Check if sigmas have been estimated
+        Returns:
+            q_optimal: Quaternion (w, x, y, z) or None if failed
+        """
+        if nadir_body is None or sun_body is None:
+            return None
+
+        # Check if standard deviations have been estimated
         if not self.sigmas_estimated:
-            raise ValueError("Sigmas have not been estimated. Call estimate_sigmas() first.")
+            raise ValueError("Standard deviations have not been estimated. Call compute_component_estimates() first.")
 
         # Use estimated sigmas
         sun_sigma = self.sun_sigma
@@ -285,55 +302,47 @@ def main():
 
     estimator = MLEAttitudeEstimator(lut_path)
 
-    # Estimate measurement uncertainties
-    estimator.estimate_sigmas(df)
+    # Single pass: compute all sun/nadir estimates and calculate standard deviations
+    cached_estimates = estimator.compute_component_estimates(df)
 
     sun_errors = []
     nadir_errors = []
     attitude_errors = []
-    valid_indices = []
 
-    mode = "MLE Attitude Estimation" if has_attitude_data else "Component Estimation"
-    print(f"\nEvaluating {mode} on {len(df)} samples...")
+    # If we have attitude data, run MLE using cached estimates
+    if has_attitude_data:
+        print(f"\nRunning MLE attitude estimation using cached component estimates...")
 
-    for i, row in df.iterrows():
-        if i % 100 == 0: print(f"  Processing {i}/{len(df)}...", end='\r')
+        for i, row in tqdm(df.iterrows(), total=len(df), desc="MLE estimation"):
+            sun_body_est, nadir_est, sun_err, nadir_err = cached_estimates[i]
 
-        sensor_cols = [f'Sensor_{k+1}' for k in range(16)]
-        sensors = row[sensor_cols].values.astype(float)
-        sun_body_true = row[['Sun_X', 'Sun_Y', 'Sun_Z']].values.astype(float)
-        nadir_body_true = row[['Nadir_X', 'Nadir_Y', 'Nadir_Z']].values.astype(float)
-        albedo = row['Albedo']
-        sun_nadir_angle = row['Sun_Nadir_Angle']
+            # Skip if component estimation failed
+            if sun_body_est is None or nadir_est is None:
+                continue
 
-        # 1. Estimate Sun (RANSAC)
-        sun_body_est, valid = estimate_sun_vector_ransac(sensors, SENSOR_NORMALS)
-        if not valid or sun_body_est is None: continue
+            # Collect component errors
+            sun_errors.append(sun_err)
+            nadir_errors.append(nadir_err)
 
-        # 2. Estimate Nadir (Entropy)
-        nadir_est, _, _ = estimator.predict_nadir(sensors, albedo, sun_nadir_angle, sun_body_est)
-        if nadir_est is None: continue
-
-        # Compute component errors
-        sun_err = angular_error_between_vectors(sun_body_est, sun_body_true)
-        nadir_err = angular_error_between_vectors(nadir_est, nadir_body_true)
-        sun_errors.append(sun_err)
-        nadir_errors.append(nadir_err)
-
-        # 3. MLE Attitude Estimation (if data available)
-        if has_attitude_data:
+            # Get ECI data
             sun_eci = row[['Sun_ECI_X', 'Sun_ECI_Y', 'Sun_ECI_Z']].values.astype(float)
             nadir_eci = row[['Nadir_ECI_X', 'Nadir_ECI_Y', 'Nadir_ECI_Z']].values.astype(float)
             quat_true = row[['Quat_W', 'Quat_X', 'Quat_Y', 'Quat_Z']].values.astype(float)
 
+            # Run MLE attitude estimation (using cached sun/nadir body vectors)
             q_est = estimator.estimate_attitude(
-                sensors, sun_body_est, sun_eci, nadir_eci, albedo, sun_nadir_angle
+                sun_body_est, nadir_est, sun_eci, nadir_eci
             )
             if q_est is None: continue
 
             att_err = quaternion_angular_error(q_est, quat_true)
             attitude_errors.append(att_err)
-            valid_indices.append(i)
+    else:
+        # Component estimation only - just extract errors from cached results
+        for sun_body_est, nadir_est, sun_err, nadir_err in cached_estimates:
+            if sun_body_est is not None and nadir_est is not None:
+                sun_errors.append(sun_err)
+                nadir_errors.append(nadir_err)
 
     sun_errors = np.array(sun_errors)
     nadir_errors = np.array(nadir_errors)
