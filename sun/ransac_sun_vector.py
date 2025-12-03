@@ -15,12 +15,12 @@ import os
 
 # RANSAC parameters
 MAX_ITERATIONS = 1000
-INLIER_THRESHOLD = 0.05  # relative error threshold (5%)
+INLIER_THRESHOLD = 0.3  # relative error threshold 
 MIN_INLIERS = 3  # minimum number of inliers required
 
 # Shadow detection parameters
-ACTIVE_THRESHOLD = 1300
-SUN_SENSOR_CLIP_VALUE = 3102  # from your test data max
+ACTIVE_THRESHOLD = 1000
+SUN_SENSOR_CLIP_VALUE = 4095  # from your test data max
 
 
 def ransac_sun_vector(
