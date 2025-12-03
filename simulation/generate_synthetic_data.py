@@ -8,6 +8,7 @@ Much faster than Blender simulation since it uses KDTree lookups instead of rayc
 import numpy as np
 import pandas as pd
 from scipy.spatial import KDTree
+from scipy.spatial.transform import Rotation as R
 import os
 import sys
 from tqdm import tqdm
@@ -184,6 +185,20 @@ def random_unit_vector():
 
     return np.array([x, y, z])
 
+def random_quaternion():
+    """Generate random unit quaternion (uniform on SO(3))"""
+    # Using Shoemake's method for uniform random rotation
+    u1, u2, u3 = np.random.uniform(0, 1, 3)
+
+    q = np.array([
+        np.sqrt(1-u1) * np.sin(2*np.pi*u2),
+        np.sqrt(1-u1) * np.cos(2*np.pi*u2),
+        np.sqrt(u1) * np.sin(2*np.pi*u3),
+        np.sqrt(u1) * np.cos(2*np.pi*u3)
+    ])
+
+    return q  # (x, y, z, w) scipy convention
+
 def is_eclipsed(sun_vector, nadir_vector):
     """Check if sun is eclipsed by Earth"""
     # Angular separation between sun and nadir
@@ -196,7 +211,14 @@ def is_eclipsed(sun_vector, nadir_vector):
 
 def generate_dataset(simulator, n_samples, output_path, min_albedo=0.1, max_albedo=0.7):
     """
-    Generate synthetic dataset
+    Generate synthetic dataset with full attitude information
+
+    The generation process:
+    1. Generate random sun/nadir vectors in ECI frame
+    2. Generate random attitude quaternion
+    3. Rotate ECI vectors to body frame using quaternion
+    4. Simulate sensor readings from body-frame vectors
+    5. Save both ECI and body-frame vectors, plus quaternion
 
     Args:
         simulator: SensorSimulator instance
@@ -209,6 +231,7 @@ def generate_dataset(simulator, n_samples, output_path, min_albedo=0.1, max_albe
     print(f"  Earth samples per sensor: {simulator.num_samples_earth}")
     print(f"  Albedo range: [{min_albedo:.2f}, {max_albedo:.2f}]")
     print(f"  Noise: {STD_SUN_SENSORS_PYRAMID} std (sensors 1-8), {STD_SUN_SENSORS_YZ} std (sensors 9-16)")
+    print(f"  Includes: Quaternions and ECI reference vectors for MLE attitude estimation")
 
     data = []
     samples_generated = 0
@@ -216,35 +239,67 @@ def generate_dataset(simulator, n_samples, output_path, min_albedo=0.1, max_albe
     pbar = tqdm(total=n_samples, desc="Generating")
 
     while samples_generated < n_samples:
-        # Random sun and nadir vectors
-        sun_vector = random_unit_vector()
-        nadir_vector = random_unit_vector()
+        # ===== ECI Frame =====
+        # Generate random sun and nadir vectors in ECI frame
+        sun_eci = random_unit_vector()
+        nadir_eci = random_unit_vector()
 
-        # Skip if eclipsed
-        if is_eclipsed(sun_vector, nadir_vector):
+        # Skip if eclipsed (check in ECI frame)
+        if is_eclipsed(sun_eci, nadir_eci):
             continue
+
+        # ===== Attitude Quaternion =====
+        # Generate random attitude (rotation from ECI to Body frame)
+        q_xyzw = random_quaternion()  # scipy format (x,y,z,w)
+        rot = R.from_quat(q_xyzw)
+        R_eci_to_body = rot.as_matrix()
+
+        # Convert to (w,x,y,z) format for storage
+        q_wxyz = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]])
+
+        # ===== Body Frame =====
+        # Rotate ECI vectors to body frame
+        sun_body = R_eci_to_body @ sun_eci
+        nadir_body = R_eci_to_body @ nadir_eci
 
         # Random albedo
         albedo = np.random.uniform(min_albedo, max_albedo)
 
-        # Simulate sensors
-        sensors = simulator.simulate_sensors(sun_vector, nadir_vector, albedo, add_noise=True)
+        # ===== Sensor Simulation =====
+        # Simulate sensors using body-frame vectors
+        sensors = simulator.simulate_sensors(sun_body, nadir_body, albedo, add_noise=True)
 
-        # Calculate sun-nadir angle
-        cos_angle = np.dot(sun_vector, nadir_vector)
+        # Calculate sun-nadir angle (same in both frames)
+        cos_angle = np.dot(sun_eci, nadir_eci)
         cos_angle = np.clip(cos_angle, -1, 1)
         sun_nadir_angle = np.degrees(np.arccos(cos_angle))
 
-        # Store sample
+        # ===== Store Sample =====
         row = {
-            'Sun_X': sun_vector[0],
-            'Sun_Y': sun_vector[1],
-            'Sun_Z': sun_vector[2],
-            'Nadir_X': nadir_vector[0],
-            'Nadir_Y': nadir_vector[1],
-            'Nadir_Z': nadir_vector[2],
+            # Body frame vectors (what sensors measure)
+            'Sun_X': sun_body[0],
+            'Sun_Y': sun_body[1],
+            'Sun_Z': sun_body[2],
+            'Nadir_X': nadir_body[0],
+            'Nadir_Y': nadir_body[1],
+            'Nadir_Z': nadir_body[2],
+
+            # ECI frame reference vectors (ground truth)
+            'Sun_ECI_X': sun_eci[0],
+            'Sun_ECI_Y': sun_eci[1],
+            'Sun_ECI_Z': sun_eci[2],
+            'Nadir_ECI_X': nadir_eci[0],
+            'Nadir_ECI_Y': nadir_eci[1],
+            'Nadir_ECI_Z': nadir_eci[2],
+
+            # Attitude quaternion (w, x, y, z)
+            'Quat_W': q_wxyz[0],
+            'Quat_X': q_wxyz[1],
+            'Quat_Y': q_wxyz[2],
+            'Quat_Z': q_wxyz[3],
         }
 
+        # Sensor readings
         for i in range(16):
             row[f'Sensor_{i+1}'] = int(round(sensors[i]))
 
@@ -286,10 +341,10 @@ if __name__ == '__main__':
 
     # Generate training set
     train_path = os.path.join(project_root, 'data/train.csv')
-    generate_dataset(simulator, n_samples=50000, output_path=train_path)
+    generate_dataset(simulator, n_samples=10000, output_path=train_path)
 
     # Generate test set
     test_path = os.path.join(project_root, 'data/test.csv')
-    generate_dataset(simulator, n_samples=10000, output_path=test_path)
+    generate_dataset(simulator, n_samples=100000, output_path=test_path)
 
     print("\nAll done!")

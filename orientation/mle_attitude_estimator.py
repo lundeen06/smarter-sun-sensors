@@ -12,7 +12,15 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from sun.ransac_sun_vector import estimate_sun_vector_ransac
 from nadir.entropy_estimator import EntropyEstimator
-from common.constants import SENSOR_NORMALS
+
+SQRT_2_INV = 1 / np.sqrt(2)
+
+# Satellite sensor normal vectors (body frame)
+SENSOR_NORMALS = np.array([
+    [SQRT_2_INV, 0, SQRT_2_INV], [SQRT_2_INV, SQRT_2_INV, 0], [SQRT_2_INV, 0, -SQRT_2_INV], [SQRT_2_INV, -SQRT_2_INV, 0],
+    [-SQRT_2_INV, 0, SQRT_2_INV], [-SQRT_2_INV, -SQRT_2_INV, 0], [-SQRT_2_INV, 0, -SQRT_2_INV], [-SQRT_2_INV, SQRT_2_INV, 0],
+    [0, 1, 0], [0, 1, 0], [0, -1, 0], [0, -1, 0], [0, 0, 1], [0, 0, 1], [0, 0, -1], [0, 0, -1],
+])
 
 def quaternion_to_rotation_matrix(q):
     """Convert quaternion (w, x, y, z) to rotation matrix."""
@@ -106,12 +114,21 @@ class MLEAttitudeEstimator:
         print("="*70 + "\n")
 
     def predict_nadir(self, sensors, albedo, sun_nadir_angle, sun_body):
-        """Predict nadir vector using Entropy Estimator."""
-        nadir_pred, entropy, probs = self.entropy_estimator.estimate(
-            sensors, sun_body, albedo, sun_nadir_angle,
-            min_albedo=0.10, max_entropy=4.5
-        )
-        return nadir_pred, entropy, probs
+        """Predict nadir vector using Entropy Estimator.
+
+        Returns:
+            nadir_pred: (3,) unit vector or None if failed
+            entropy: Posterior entropy (nats)
+            probs: Always None (not returned in current implementation)
+        """
+        try:
+            nadir_pred, entropy = self.entropy_estimator.get_nadir(
+                sensors, sun_body, albedo, sun_nadir_angle
+            )
+            return nadir_pred, entropy, None
+        except Exception as e:
+            # If estimation fails, return None
+            return None, None, None
 
     def negative_log_likelihood(self, rotation_params, measurements_body, measurements_eci, sigmas):
         rot = R.from_rotvec(rotation_params)
@@ -242,91 +259,199 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--samples', type=int, default=None, help='Number of samples')
     args = parser.parse_args()
-    
+
     # Paths
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     test_csv = os.path.join(project_root, 'data/test.csv')
-    lut_path = os.path.join(project_root, 'data/occlusion_lut.csv')
-    
+    lut_path = os.path.join(project_root, 'data/sensor_occlusion_lut.csv')
+
     if not os.path.exists(test_csv):
         print(f"Error: {test_csv} not found")
         return
-        
+
     print(f"Loading data from {test_csv}...")
     df = pd.read_csv(test_csv)
     if args.samples: df = df.head(args.samples)
 
+    # Check if dataset has quaternions and ECI data
+    has_attitude_data = 'Quat_W' in df.columns and 'Sun_ECI_X' in df.columns
+
+    if not has_attitude_data:
+        print("\n" + "="*70)
+        print("NOTE: Dataset doesn't contain ECI/quaternion data.")
+        print("      Running COMPONENT ESTIMATION ONLY (Sun + Nadir vectors)")
+        print("      To test full MLE attitude: regenerate data/test.csv")
+        print("="*70 + "\n")
+
     estimator = MLEAttitudeEstimator(lut_path)
 
-    # Estimate the measurement uncertainties
+    # Estimate measurement uncertainties
     estimator.estimate_sigmas(df)
 
-    q_preds = []
     sun_errors = []
     nadir_errors = []
+    attitude_errors = []
     valid_indices = []
 
-    print(f"Evaluating on {len(df)} samples...")
-    
+    mode = "MLE Attitude Estimation" if has_attitude_data else "Component Estimation"
+    print(f"\nEvaluating {mode} on {len(df)} samples...")
+
     for i, row in df.iterrows():
         if i % 100 == 0: print(f"  Processing {i}/{len(df)}...", end='\r')
-        
+
         sensor_cols = [f'Sensor_{k+1}' for k in range(16)]
         sensors = row[sensor_cols].values.astype(float)
         sun_body_true = row[['Sun_X', 'Sun_Y', 'Sun_Z']].values.astype(float)
         nadir_body_true = row[['Nadir_X', 'Nadir_Y', 'Nadir_Z']].values.astype(float)
-        
-        sun_eci = row[['Sun_ECI_X', 'Sun_ECI_Y', 'Sun_ECI_Z']].values.astype(float)
-        nadir_eci = row[['Nadir_ECI_X', 'Nadir_ECI_Y', 'Nadir_ECI_Z']].values.astype(float)
-        
-        quat_true = row[['Quat_W', 'Quat_X', 'Quat_Y', 'Quat_Z']].values.astype(float)
         albedo = row['Albedo']
         sun_nadir_angle = row['Sun_Nadir_Angle']
-        
+
         # 1. Estimate Sun (RANSAC)
         sun_body_est, valid = estimate_sun_vector_ransac(sensors, SENSOR_NORMALS)
         if not valid or sun_body_est is None: continue
-        
-        # 2. Estimate Attitude (MLE)
-        q_est = estimator.estimate_attitude(
-            sensors, sun_body_est, sun_eci, nadir_eci, albedo, sun_nadir_angle
-        )
-        if q_est is None: continue
-        
-        # Errors
-        att_err = quaternion_angular_error(q_est, quat_true)
-        sun_err = angular_error_between_vectors(sun_body_est, sun_body_true)
-        
-        # Re-predict nadir for error logging
+
+        # 2. Estimate Nadir (Entropy)
         nadir_est, _, _ = estimator.predict_nadir(sensors, albedo, sun_nadir_angle, sun_body_est)
+        if nadir_est is None: continue
+
+        # Compute component errors
+        sun_err = angular_error_between_vectors(sun_body_est, sun_body_true)
         nadir_err = angular_error_between_vectors(nadir_est, nadir_body_true)
-        
-        q_preds.append(q_est)
         sun_errors.append(sun_err)
         nadir_errors.append(nadir_err)
-        valid_indices.append(i)
-        
-    q_preds = np.array(q_preds)
+
+        # 3. MLE Attitude Estimation (if data available)
+        if has_attitude_data:
+            sun_eci = row[['Sun_ECI_X', 'Sun_ECI_Y', 'Sun_ECI_Z']].values.astype(float)
+            nadir_eci = row[['Nadir_ECI_X', 'Nadir_ECI_Y', 'Nadir_ECI_Z']].values.astype(float)
+            quat_true = row[['Quat_W', 'Quat_X', 'Quat_Y', 'Quat_Z']].values.astype(float)
+
+            q_est = estimator.estimate_attitude(
+                sensors, sun_body_est, sun_eci, nadir_eci, albedo, sun_nadir_angle
+            )
+            if q_est is None: continue
+
+            att_err = quaternion_angular_error(q_est, quat_true)
+            attitude_errors.append(att_err)
+            valid_indices.append(i)
+
     sun_errors = np.array(sun_errors)
     nadir_errors = np.array(nadir_errors)
-    
-    # Compute attitude errors
-    quat_true_filtered = df.iloc[valid_indices][['Quat_W', 'Quat_X', 'Quat_Y', 'Quat_Z']].values
-    angular_errors = quaternion_angular_error(q_preds, quat_true_filtered)
-    
+
+    # Print results
     print("\n" + "="*70)
-    print("MLE ATTITUDE ESTIMATION RESULTS")
+    if has_attitude_data:
+        attitude_errors = np.array(attitude_errors)
+        print("MLE ATTITUDE ESTIMATION RESULTS")
+        print("="*70)
+        print(f"Valid Samples: {len(attitude_errors)}/{len(df)} ({100*len(attitude_errors)/len(df):.1f}%)\n")
+        print(f"Attitude Error:")
+        print(f"  Mean:   {attitude_errors.mean():.4f}°")
+        print(f"  Median: {np.median(attitude_errors):.4f}°")
+        print(f"  Std:    {attitude_errors.std():.4f}°")
+        print(f"  95th:   {np.percentile(attitude_errors, 95):.4f}°")
+    else:
+        print("COMPONENT ESTIMATION RESULTS")
+        print("="*70)
+        print(f"Valid Samples: {len(sun_errors)}/{len(df)} ({100*len(sun_errors)/len(df):.1f}%)\n")
+
+    print(f"\nSun Vector (RANSAC):")
+    print(f"  Mean:   {sun_errors.mean():.4f}°")
+    print(f"  Median: {np.median(sun_errors):.4f}°")
+    print(f"  Std:    {sun_errors.std():.4f}°")
+    print(f"  95th:   {np.percentile(sun_errors, 95):.4f}°")
+    print(f"\nNadir Vector (Entropy):")
+    print(f"  Mean:   {nadir_errors.mean():.4f}°")
+    print(f"  Median: {np.median(nadir_errors):.4f}°")
+    print(f"  Std:    {nadir_errors.std():.4f}°")
+    print(f"  95th:   {np.percentile(nadir_errors, 95):.4f}°")
     print("="*70)
-    print(f"Valid Samples: {len(angular_errors)}/{len(df)} ({100*len(angular_errors)/len(df):.1f}%)")
-    print(f"Attitude Error: Mean={angular_errors.mean():.2f}°, Median={np.median(angular_errors):.2f}°")
-    print(f"Sun Error:      Mean={sun_errors.mean():.2f}°, Median={np.median(sun_errors):.2f}°")
-    print(f"Nadir Error:    Mean={nadir_errors.mean():.2f}°, Median={np.median(nadir_errors):.2f}°")
-    
-    plot_results({
-        'angular_errors': angular_errors,
-        'sun_errors': sun_errors,
-        'nadir_errors': nadir_errors
-    })
+
+    # Plotting
+    if has_attitude_data:
+        # 3-plot layout: Attitude + Sun + Nadir
+        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
+
+        # Plot 1: Attitude errors
+        ax1.hist(attitude_errors, bins=50, edgecolor='black', alpha=0.7, color='skyblue')
+        ax1.axvline(attitude_errors.mean(), color='red', linestyle='--', linewidth=2,
+                   label=f'Mean: {attitude_errors.mean():.2f}°')
+        ax1.axvline(np.median(attitude_errors), color='blue', linestyle=':', linewidth=2,
+                   label=f'Median: {np.median(attitude_errors):.2f}°')
+        ax1.set_xlabel('Angular Error (degrees)', fontsize=10)
+        ax1.set_ylabel('Frequency', fontsize=10)
+        ax1.set_title(f'Attitude Error (n={len(attitude_errors)})', fontsize=11, fontweight='bold')
+        ax1.legend(fontsize=9)
+        ax1.grid(True, alpha=0.3)
+
+        # Plot 2: Sun errors
+        ax2.hist(sun_errors, bins=50, edgecolor='black', alpha=0.7, color='gold')
+        ax2.axvline(sun_errors.mean(), color='red', linestyle='--', linewidth=2,
+                   label=f'Mean: {sun_errors.mean():.2f}°')
+        ax2.axvline(np.median(sun_errors), color='blue', linestyle=':', linewidth=2,
+                   label=f'Median: {np.median(sun_errors):.2f}°')
+        ax2.set_xlabel('Sun Vector Error (degrees)', fontsize=10)
+        ax2.set_ylabel('Frequency', fontsize=10)
+        ax2.set_title(f'RANSAC Sun Error (n={len(sun_errors)})', fontsize=11, fontweight='bold')
+        ax2.legend(fontsize=9)
+        ax2.grid(True, alpha=0.3)
+
+        # Plot 3: Nadir errors
+        ax3.hist(nadir_errors, bins=50, edgecolor='black', alpha=0.7, color='lightgreen')
+        ax3.axvline(nadir_errors.mean(), color='red', linestyle='--', linewidth=2,
+                   label=f'Mean: {nadir_errors.mean():.2f}°')
+        ax3.axvline(np.median(nadir_errors), color='blue', linestyle=':', linewidth=2,
+                   label=f'Median: {np.median(nadir_errors):.2f}°')
+        ax3.set_xlabel('Nadir Vector Error (degrees)', fontsize=10)
+        ax3.set_ylabel('Frequency', fontsize=10)
+        ax3.set_title(f'Entropy Nadir Error (n={len(nadir_errors)})', fontsize=11, fontweight='bold')
+        ax3.legend(fontsize=9)
+        ax3.grid(True, alpha=0.3)
+
+        plt.suptitle('MLE Attitude Estimation (RANSAC + Entropy + MLE)',
+                    fontsize=14, fontweight='bold')
+        save_name = 'mle_attitude_results.png'
+    else:
+        # 2-plot layout: Sun + Nadir only
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+        # Plot 1: Sun errors
+        ax1.hist(sun_errors, bins=50, edgecolor='black', alpha=0.7, color='gold')
+        ax1.axvline(sun_errors.mean(), color='red', linestyle='--', linewidth=2,
+                   label=f'Mean: {sun_errors.mean():.2f}°')
+        ax1.axvline(np.median(sun_errors), color='blue', linestyle=':', linewidth=2,
+                   label=f'Median: {np.median(sun_errors):.2f}°')
+        ax1.set_xlabel('Sun Vector Error (degrees)', fontsize=10)
+        ax1.set_ylabel('Frequency', fontsize=10)
+        ax1.set_title(f'RANSAC Sun Error (n={len(sun_errors)})', fontsize=11, fontweight='bold')
+        ax1.legend(fontsize=9)
+        ax1.grid(True, alpha=0.3)
+
+        # Plot 2: Nadir errors
+        ax2.hist(nadir_errors, bins=50, edgecolor='black', alpha=0.7, color='lightgreen')
+        ax2.axvline(nadir_errors.mean(), color='red', linestyle='--', linewidth=2,
+                   label=f'Mean: {nadir_errors.mean():.2f}°')
+        ax2.axvline(np.median(nadir_errors), color='blue', linestyle=':', linewidth=2,
+                   label=f'Median: {np.median(nadir_errors):.2f}°')
+        ax2.set_xlabel('Nadir Vector Error (degrees)', fontsize=10)
+        ax2.set_ylabel('Frequency', fontsize=10)
+        ax2.set_title(f'Entropy Nadir Error (n={len(nadir_errors)})', fontsize=11, fontweight='bold')
+        ax2.legend(fontsize=9)
+        ax2.grid(True, alpha=0.3)
+
+        plt.suptitle('Component Estimation (RANSAC Sun + Entropy Nadir)',
+                    fontsize=14, fontweight='bold')
+        save_name = 'component_estimation_results.png'
+
+    plt.tight_layout()
+
+    # Use absolute path to plots folder
+    plots_dir = os.path.join(project_root, 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
+    save_path = os.path.join(plots_dir, save_name)
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"\nPlot saved as '{save_path}'")
+    plt.show()
 
 if __name__ == "__main__":
     main()
