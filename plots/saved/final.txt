@@ -1,0 +1,42 @@
+(venv) lundeencahilly@Lundeens-MacBook-Pro-5 samwise-smarter-sun-sensors % python orientation/mle_attitude_estimator.py             
+Loading data from /Users/lundeencahilly/Desktop/github/samwise-smarter-sun-sensors/data/test.csv...
+Loading Occlusion LUT from /Users/lundeencahilly/Desktop/github/samwise-smarter-sun-sensors/data/sensor_occlusion_lut.csv...
+
+Computing sun and nadir estimates for all samples...
+Computing estimates: 100%|████████████████████████████████████| 10000/10000 [05:45<00:00, 28.97it/s]
+
+
+======================================================================
+ESTIMATED MEASUREMENT STANDARD DEVIATIONS
+======================================================================
+Sun σ:   2.1141°
+Nadir σ: 4.7445°
+======================================================================
+
+
+Running MLE attitude estimation using cached component estimates...
+MLE estimation: 100%|████████████████████████████████████████| 10000/10000 [00:26<00:00, 378.10it/s]
+
+======================================================================
+MLE ATTITUDE ESTIMATION RESULTS
+======================================================================
+Valid Samples: 3739/10000 (37.4%)
+
+Attitude Error:
+  Mean:   3.1947°
+  Median: 1.9573°
+  Std:    5.9022°
+  95th:   8.2280°
+
+Sun Vector (RANSAC):
+  Mean:   1.2272°
+  Median: 0.6887°
+  Std:    2.1141°
+  95th:   3.4073°
+
+Nadir Vector (Entropy):
+  Mean:   2.5683°
+  Median: 1.5535°
+  Std:    4.7445°
+  95th:   6.8037°
+======================================================================
