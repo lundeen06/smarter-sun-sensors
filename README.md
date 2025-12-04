@@ -1,7 +1,7 @@
 <img src="images/samwise-cropped.png" alt="SAMWISE CubeSat" height="200" style="float: right; margin-left: 20px;">
 
 # Sunny Side Up!
-## Coarse Sun Sensor-Only Attitude Determination for SmallSats
+## Coarse Sun Sensor-Only Attitude Determination for Small Satellites
 
 Small satellites have a very big problem.
 
