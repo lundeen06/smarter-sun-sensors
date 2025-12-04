@@ -21,7 +21,7 @@ class SearchConfig:
     - Stage 2: Zoom into ±15° window around best candidate
     - Stage 3: Final precision search in ±3° window
     """
-    coarse_samples: int = 360      # Stage 1: Full circle search
+    coarse_samples: int = 180      # Stage 1: Full circle search
     medium_samples: int = 100      # Stage 2: Medium refinement
     fine_samples: int = 100        # Stage 3: Fine refinement
     medium_window_deg: float = 15.0  # Stage 2 search window
