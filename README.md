@@ -1,5 +1,7 @@
-# Sunny Side Up!  <img src="images/samwise-cropped.png" alt="SAMWISE CubeSat" height="80" style="padding-left:30px;">
-Coarse Sun Sensor-Only Attitude Determination for SmallSats
+<img src="images/samwise-cropped.png" alt="SAMWISE CubeSat" height="200" style="float: right; margin-left: 20px;">
+
+# Sunny Side Up!
+## Coarse Sun Sensor-Only Attitude Determination for SmallSats
 
 Small satellites have a very big problem.
 
@@ -70,7 +72,7 @@ We're not done - bad estimates have to be heavily penalized and filtered out, be
 
 I tested my algorithm on a simulated dataset of N=10000 samples for the SAMWISE cubesat design. The algorithm rejected 4856/10000 samples, and ultimately predicted nadir vectors with a 1.22º mean error, a standard deviation of 1.44°, and a max error of 15.83°.
 
-<img src="plots/saved/nadir_entropy_correlation-FULL.png" alt="Nadir Entropy Correlation - Full Dataset" width="600"> <img src="plots/saved/nadir_error_distribution-FILTERED.png" alt="Nadir Error Distribution - Filtered" width="600">
+<img src="plots/saved/nadir_entropy_correlation-FULL.png" alt="Nadir Entropy Correlation - Full Dataset" width="800"> <img src="plots/saved/nadir_error_distribution-FILTERED.png" alt="Nadir Error Distribution - Filtered" width="800">
 
 I'm actually blown away at these results. It just seems so improbable that such cheap, simple sensors could make such an accurate guess for both signals when I factored in noise, non-point source nature of the Earth, among other complications. This is amazing as well because sun sensors can update incredibly fast, unlike other sensors like star trackers or fine sun sensors.
 
@@ -78,7 +80,7 @@ This result is significant on a broader scale right now because the cost barrier
 
 With more cheap, robust alternatives for ADCS stacks, there will be the opportunity for wonderful people to make cheaper, smarter, and more robust satellites that enable more research and industry activity that will lead to discoveries that help everyone at a large scale. Super stoked!
 
-- Lundeen Cahilly
+by Lundeen Cahilly :)
 
 ---
 
@@ -93,7 +95,7 @@ Although I previously wrote an extended Kalman filter for this satellite to esti
 
 When ran on the same dataset above, I got the following results:
 
-<img src="plots/saved/mle_attitude_results-FINAL.png" alt="MLE Attitude Results" width="700">
+<img src="plots/saved/mle_attitude_results-FINAL.png" alt="MLE Attitude Results" width="1000">
 
 The attitude accuracy is approximately 3º mean error, which is far better than I had ever expected. The sun vector estimation I had previously written in flight code and ported into Python, and naturally has reasonable error (and could be optimized!). What I find notable is that the mean error of the nadir vector only shifts very slightly ~1º because we're sometimes feeding in inaccurate sun vector priors. A future development on my nadir vector estimation algorithm would be to treat this prior as a random variable itself, and make changes to both the prior and search space logic.
 
