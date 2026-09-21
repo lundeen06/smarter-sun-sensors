@@ -3,6 +3,10 @@
 # Sunny Side Up!
 ## Coarse Sun Sensor-Only Attitude Determination for Small Satellites
 
+**Can a satellite recover a second attitude reference from the light Earth reflects into its coarse sun sensors?** This project models that reflected signal and uses maximum-likelihood estimation to infer a nadir vector—turning a simple, distributed sensor array into a potential fallback when the magnetometer is unavailable.
+
+For the SAMWISE CubeSat geometry, a 10,000-sample simulation produced a **1.22° mean nadir error** after uncertainty-based rejection. The method is still simulation work, but the result points toward a cheap and fault-tolerant addition to a small-satellite ADCS stack.
+
 Small satellites have a very big problem.
 
 Expensive, non-fault tolerant parts! You're limited in how many sensors you can carry, so any broken sensor becomes a massive problem.
@@ -17,7 +21,7 @@ Here's how the attitude determination problem works:
 
 One super important note! You need at least 2 measurement vectors to constrain attitude. If you only have one vector, you could 'spin' around that axis and still get the same measurement. An additional vector constrains that 'spin'.
 
-I'm building a satellite right now at the Stanford Student Space Initiative called SAMWISE (above!), which is launching in June! Our sensor suite consists of two magnetometers and 16 coarse sun sensors.
+I'm building a satellite right now at the Stanford Student Space Initiative called SAMWISE (above!), which is scheduled to launch in October 2026! Our sensor suite consists of two magnetometers and 16 coarse sun sensors.
 
 Our ADCS hardware is very cheap (<$3000), but that comes at a cost - we only have 2 measurement vectors. Coarse sun sensors are very reliable and distributed, as it's unlikely one fails, and if it does, we can simply ignore it. However, if our magnetometer experiences an issue, we will very likely lose that measurement vector entirely. This would mean we fully lose attitude. Uh oh.
 
